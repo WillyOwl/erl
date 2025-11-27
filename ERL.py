@@ -704,6 +704,9 @@ class Visualizer:
         self.fig.canvas.flush_events()
         # plt.pause(0.001) # Small pause to update
 
+    def close(self):
+        plt.close(self.fig)
+
 # --- MAIN RUNNER ---
 
 def run_simulation(strategy='ERL', visualize=True, max_steps=10000):
@@ -745,9 +748,9 @@ def run_simulation(strategy='ERL', visualize=True, max_steps=10000):
     except KeyboardInterrupt:
         print("Simulation stopped by user.")
         return t
-                
-    except KeyboardInterrupt:
-        print("Simulation stopped by user.")
+    finally:
+        if vis:
+            vis.close()
 
 if __name__ == "__main__":
     run_simulation()
