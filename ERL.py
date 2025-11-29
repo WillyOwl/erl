@@ -22,18 +22,18 @@ GENOME_BITS_PER_WEIGHT = 4
 GENOME_LENGTH = TOTAL_WEIGHTS * GENOME_BITS_PER_WEIGHT
 
 # Learning Constants (CRBP)
-LEARNING_RATE_POS = 0.05 # Increased from 0.02
-LEARNING_RATE_NEG = 0.01 # Increased from 0.005
-NOISE_PROB = 0.02       # "v" parameter in CRBP, effective temperature
+LEARNING_RATE_POS = 0.1 # Increased from 0.05 to speed up learning
+LEARNING_RATE_NEG = 0.02 # Increased from 0.01
+NOISE_PROB = 0.1       # Increased to 0.1 to encourage exploration
 
 # Simulation Constants
-AGENT_VIEW_DIST = 4 # Paper: 4 cells
+AGENT_VIEW_DIST = 10 # Increased to 10 to ensure agents see food
 CARNIVORE_VIEW_DIST = 6 # Paper: 6 cells
 CARNIVORE_SPAWN_FREQ = 200
 
 # Strategy Configuration
 # ERL: Evolution + Learning
-# E: Evolution only
+# E: Evolution onlyx
 # L: Learning only (No inheritance)
 # F: Fixed (No evolution, no learning)
 # B: Brownian (Random walk)
@@ -42,14 +42,14 @@ SIM_STRATEGY = 'ERL'
 # Energy/Health Dynamics (Inferred standard AL values)
 MAX_ENERGY = 100.0
 MAX_HEALTH = 1.0
-ENERGY_COST_MOVE = 0.5 # Lowered to encourage exploration
-ENERGY_GAIN_PLANT = 50.0 # Increased to reward finding food
+ENERGY_COST_MOVE = 0.5 # Cheap movement
+ENERGY_GAIN_PLANT = 50.0 # Standard reward
 ENERGY_GAIN_MEAT = 50.0
-DAMAGE_CARNIVORE = 0.2
-DAMAGE_WALL = 0.05
-REPRODUCE_ENERGY_THRESHOLD = 90.0 # Increased to prevent overpopulation
-REPRODUCE_COST = 60.0 # Increased cost
-PLANT_GROWTH_PROB = 0.1 # Faster regrowth
+DAMAGE_CARNIVORE = 1.0 # Instant death
+DAMAGE_WALL = 0.2 # 5 hits = death
+REPRODUCE_ENERGY_THRESHOLD = 95.0 # Hard to reproduce
+REPRODUCE_COST = 90.0 # High cost
+PLANT_GROWTH_PROB = 0.03 # Moderate food
 PLANT_MAX_DENSITY_NEIGHBORS = 4
 TREE_BIRTH_PROB = 0.001 # Infrequent
 TREE_DEATH_PROB = 0.001 # Infrequent
@@ -68,14 +68,18 @@ DIRS = [(0, -1), (1, 0), (0, 1), (-1, 0)] # x, y changes
 # --- HELPER FUNCTIONS ---
 
 def sigmoid(x):
-    return 1.0 / (1.0 + np.exp(-np.clip(x, -20, 20))) # Clipped for stability
+    # Fastest version: 1 / (1 + exp(-x))
+    # Overflow in exp(-x) yields inf, and 1/(1+inf) -> 0.0, which is correct for sigmoid(large_negative).
+    # We suppress warnings globally or just accept them.
+    return 1.0 / (1.0 + np.exp(-x))
 
 def bits_to_weight(bits):
     """Decodes 4 bits into a weight value.
     Mapping 0-15 integer to range roughly -4.0 to +4.0"""
     val = int(bits, 2)
-    # Map 0..15 to -3.75 .. +3.75
-    return (val - 7.5) / 5.0 # Reduced range [-1.5, 1.5] to prevent saturation
+    # Map 0..15 to -0.375 .. +0.375 (Was -1.5 to 1.5)
+    # Smaller weights = Sigmoid closer to 0.5 = More random initial behavior
+    return (val - 7.5) / 20.0
 
 def get_distance_value(dist, max_dist):
     """Paper: 'value from 0.5 to 1.0 proportional to closeness'"""
@@ -232,7 +236,13 @@ class ERLAgent(Entity):
         self.prev_action_probs = np.zeros(ACTION_OUTPUT_SIZE)
         self.prev_action_idx = 0
         self.prev_eval = 0.0
+        self.prev_energy = self.energy
+        self.prev_health = self.health # Track previous health
         self.just_born = True
+        
+        # Pre-allocated buffers for optimization
+        self.grad_buffer = np.zeros((INPUT_SIZE, ACTION_OUTPUT_SIZE))
+        self.errors_buffer = np.zeros(ACTION_OUTPUT_SIZE)
         
     def get_inputs(self, world):
         # 28 Inputs:
@@ -240,6 +250,7 @@ class ERLAgent(Entity):
         # [Health, Energy, InTree, Bias] (4 inputs)
         
         inputs = np.zeros(INPUT_SIZE)
+        grid = world.grid # Direct access
         
         # Visual
         for i, (dx, dy) in enumerate(DIRS): # N, E, S, W
@@ -247,14 +258,17 @@ class ERLAgent(Entity):
             closest_dist = AGENT_VIEW_DIST + 1
             
             # Ray cast
+            tx, ty = self.x, self.y
             for d in range(1, AGENT_VIEW_DIST + 1):
-                tx, ty = self.x + (dx * d), self.y + (dy * d)
+                tx += dx
+                ty += dy
+                
                 if not (0 <= tx < WORLD_WIDTH and 0 <= ty < WORLD_HEIGHT):
                     closest_type = TYPE_WALL
                     closest_dist = d
                     break
                 
-                occ = world.get_occupant(tx, ty)
+                occ = grid[tx][ty]
                 if occ:
                     closest_type = occ.type_id
                     closest_dist = d
@@ -298,69 +312,93 @@ class ERLAgent(Entity):
         
         # --- L1: Evaluation ---
         # Eval Net Forward: Input (1x28) * Weights (28x1) -> Scalar
-        current_eval = sigmoid(np.dot(current_input, self.w_eval)[0])
+        # Inline sigmoid: 1 / (1 + exp(-x))
+        dot_eval = np.dot(current_input, self.w_eval)[0]
+        current_eval = 1.0 / (1.0 + np.exp(-dot_eval))
         
         # --- L2: Learning (CRBP) ---
         # ERL and L learn. E, F, B do not.
         if SIM_STRATEGY in ['ERL', 'L'] and not self.just_born:
-            # Reinforcement Signal
-            r = current_eval - self.prev_eval
+            # Reinforcement Signal (Step 1)
+            # Composite Reward: Energy + Health (scaled)
+            delta_energy = self.energy - self.prev_energy
+            delta_health = (self.health - self.prev_health) * 100.0
+            r = delta_energy + delta_health
             
-            # Reconstruct previous output activity (s_j in paper)
-            # In single layer, output s_j is just sigmoid(net)
-            # But wait, action net produces probabilities?
-            # Paper: "Action net... maps sensory input to behavior... probs... output"
-            # It's a standard simple perceptron where outputs are sigmoided.
+            # Noise Gate: Ignore standard movement cost to prevent paralysis
+            # Cost is 1.2. We ignore anything between -1.5 and +1.5
+            if abs(r) < 1.5:
+                r = 0.0
             
-            # Error Calculation
-            # We need the actual vector output produced last time?
-            # The paper says: "Use CRBP... to update action net with respect to previous action X_{t-1} and previous input I_{t-1}"
-            
-            # Calculate what the network *would* output for prev_input (forward pass)
-            # We don't need to re-run, we should store it.
-            # However, weights might have changed? No, they change now.
-            
-            net_out = sigmoid(np.dot(self.prev_input, self.w_action)) # vector of size 2
-            
-            # Construct target/error
-            # Actual action taken was self.prev_action_idx (0..3)
-            # The network output is 2 bits. We need to map action index to 2 bits?
-            # Paper says "Output is 2 bits coding action direction N, S, E, W".
-            # Mapping: N(00), E(01), S(10), W(11)?
-            # Let's use binary encoding of the action index.
-            
-            action_bits = [(self.prev_action_idx >> 1) & 1, self.prev_action_idx & 1]
-            
-            # CRBP Error Term
-            # if r > 0: e_j = (o_j - s_j) * s_j * (1 - s_j) where o_j is the Taken Action bit
-            # if r < 0: e_j = (1 - o_j - s_j) * s_j * (1 - s_j) (Complement)
-            
-            errors = np.zeros(ACTION_OUTPUT_SIZE)
-            for j in range(ACTION_OUTPUT_SIZE):
-                s_j = net_out[j]
-                o_j = action_bits[j] # The bit that WAS output
+            # Step 1: If r = 0, go to 6 (Skip learning)
+            if r != 0:
+                # Reconstruct previous action (o)
+                # Paper says "Output is 2 bits coding action direction N, S, E, W".
+                action_bits = [(self.prev_action_idx >> 1) & 1, self.prev_action_idx & 1]
                 
-                deriv = s_j * (1.0 - s_j)
-                
-                if r >= 0:
-                    errors[j] = (o_j - s_j) * deriv
-                else:
-                    errors[j] = ((1.0 - o_j) - s_j) * deriv
-            
-            # Update Weights
-            # delta w_jk = eta * e_k * input_j
-            learning_rate = LEARNING_RATE_POS if r >= 0 else LEARNING_RATE_NEG
-            
-            # Vectorized update
-            # w_action is 28x2. input is 28. error is 2.
-            # outer product
-            grad = np.outer(self.prev_input, errors)
-            self.w_action += learning_rate * grad
-            
-            # Mental Rehearsal Loop (Step 5 in CRBP Fig 3)
-            # Repeat update if r>0 and network doesn't output same, or r<0 and network does output same
-            # Simplified for performance: standard implementation often skips loop or limits it.
-            # We will do 1 iteration max to avoid stalling in Python.
+                # Mental Rehearsal Loop (Step 5)
+                # We loop until the network output matches the desired outcome (or max iterations)
+                for _ in range(20): # Safety limit for loop
+                    # Forward pass on previous input (s_j)
+                    # Inline sigmoid
+                    dot_action = np.dot(self.prev_input, self.w_action)
+                    net_out = 1.0 / (1.0 + np.exp(-dot_action))
+                    
+                    # Error Calculation (Step 2)
+                    # Unrolled for ACTION_OUTPUT_SIZE = 2
+                    s0 = net_out[0]
+                    s1 = net_out[1]
+                    o0 = action_bits[0]
+                    o1 = action_bits[1]
+                    
+                    d0 = s0 * (1.0 - s0)
+                    d1 = s1 * (1.0 - s1)
+                    
+                    if r > 0:
+                        e0 = (o0 - s0) * d0
+                        e1 = (o1 - s1) * d1
+                    else:
+                        e0 = ((1.0 - o0) - s0) * d0
+                        e1 = ((1.0 - o1) - s1) * d1
+                        
+                    self.errors_buffer[0] = e0
+                    self.errors_buffer[1] = e1
+                    
+                    # Update Weights (Step 4)
+                    learning_rate = LEARNING_RATE_POS if r > 0 else LEARNING_RATE_NEG
+                    
+                    # Zero-allocation update:
+                    # 1. Compute gradient into buffer
+                    np.multiply(self.prev_input[:, None], self.errors_buffer[None, :], out=self.grad_buffer)
+                    
+                    # 2. Scale by learning rate (in-place)
+                    self.grad_buffer *= learning_rate
+                    
+                    # 3. Update weights (in-place)
+                    self.w_action += self.grad_buffer
+                    
+                    # Step 5: Forward propagate again to produce new s_j's
+                    # Inline sigmoid
+                    dot_new = np.dot(self.prev_input, self.w_action)
+                    new_net_out = 1.0 / (1.0 + np.exp(-dot_new))
+                    
+                    # Generate temporary output vector o*
+                    # Unrolled bit generation
+                    s_j0 = new_net_out[0]
+                    prob0 = (s_j0 - 0.5) / NOISE_PROB + 0.5
+                    bit0 = 1 if prob0 >= random.random() else 0
+                    
+                    s_j1 = new_net_out[1]
+                    prob1 = (s_j1 - 0.5) / NOISE_PROB + 0.5
+                    bit1 = 1 if prob1 >= random.random() else 0
+                    
+                    # Check condition: If (r > 0 and o* != o) or (r < 0 and o* == o), go to 2
+                    o_matches = (bit0 == o0 and bit1 == o1)
+                    
+                    if (r > 0 and not o_matches) or (r < 0 and o_matches):
+                        continue # Loop again
+                    else:
+                        break # Condition satisfied, exit loop
             
         
         # --- L3: Behave ---
@@ -387,6 +425,8 @@ class ERLAgent(Entity):
         self.prev_input = current_input
         self.prev_action_idx = action_idx
         self.prev_eval = current_eval
+        self.prev_energy = self.energy
+        self.prev_health = self.health
         self.just_born = False
         
     def perform_action(self, world, action_idx):
@@ -515,7 +555,8 @@ class World:
             
         # Initial Agents
         for _ in range(100):
-            self.spawn_agent_near(50, 50, Genome())
+            # Random spawn distribution
+            self.spawn_agent_near(random.randint(1,98), random.randint(1,98), Genome())
             
         # Initial Carnivores
         for _ in range(5):
@@ -709,19 +750,24 @@ class Visualizer:
 
 # --- MAIN RUNNER ---
 
-def run_simulation(strategy='ERL', visualize=True, max_steps=10000):
+def run_simulation(strategy='ERL', visualize=True, max_steps=10000, seed=None):
     global SIM_STRATEGY
     SIM_STRATEGY = strategy
+    
+    if seed is not None:
+        random.seed(seed)
+        np.random.seed(seed)
+        # print(f"Simulation Seed: {seed}")
     
     world = World()
     vis = None
     if visualize:
         vis = Visualizer(WORLD_WIDTH, WORLD_HEIGHT)
     
-    print(f"Starting Simulation. Strategy: {strategy}")
-    print(f"Initial Agents: {len(world.agents)}")
-    print(f"Initial Carnivores: {len(world.carnivores)}")
-    print(f"Initial Plants: {len(world.plants)}")
+    # print(f"Starting Simulation. Strategy: {strategy}")
+    # print(f"Initial Agents: {len(world.agents)}")
+    # print(f"Initial Carnivores: {len(world.carnivores)}")
+    # print(f"Initial Plants: {len(world.plants)}")
     
     # Run loop
     try:
@@ -731,10 +777,10 @@ def run_simulation(strategy='ERL', visualize=True, max_steps=10000):
             if visualize and t % 10 == 0:
                 vis.update(world)
             
-            if t % 1000 == 0:
+            if t % 10000 == 0:
                 # Print progress even if not visualizing to debug hangs
                 if not visualize:
-                    print(f"Step {t}...", flush=True)
+                    print(f"[{strategy}] Step {t}...", flush=True)
 
             if t % 100 == 0:
                 # Only print if visualizing or infrequent
