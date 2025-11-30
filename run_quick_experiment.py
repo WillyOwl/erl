@@ -6,7 +6,7 @@ import multiprocessing
 
 # Configuration for Quick Verification
 STRATEGIES = ['ERL', 'E', 'L', 'F', 'B']
-TRIALS_PER_STRATEGY = 10 # Increased for better distribution data
+TRIALS_PER_STRATEGY = 100 # Reduced for quick baseline
 MAX_STEPS = 2000 # Reduced from 1,000,000
 
 def run_single_trial(strategy, trial_num, seed_offset):

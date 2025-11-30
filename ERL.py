@@ -22,12 +22,12 @@ GENOME_BITS_PER_WEIGHT = 4
 GENOME_LENGTH = TOTAL_WEIGHTS * GENOME_BITS_PER_WEIGHT
 
 # Learning Constants (CRBP)
-LEARNING_RATE_POS = 0.1 # Increased from 0.05 to speed up learning
-LEARNING_RATE_NEG = 0.02 # Increased from 0.01
-NOISE_PROB = 0.1       # Increased to 0.1 to encourage exploration
+LEARNING_RATE_POS = 0.05 # Fast learning to fix broken weights
+LEARNING_RATE_NEG = 0.05 # Fast learning to fix broken weights
+NOISE_PROB = 0.5       # Balanced
 
 # Simulation Constants
-AGENT_VIEW_DIST = 10 # Increased to 10 to ensure agents see food
+AGENT_VIEW_DIST = 20 # Increased to 20 to give advantage to smart agents
 CARNIVORE_VIEW_DIST = 6 # Paper: 6 cells
 CARNIVORE_SPAWN_FREQ = 200
 
@@ -42,14 +42,14 @@ SIM_STRATEGY = 'ERL'
 # Energy/Health Dynamics (Inferred standard AL values)
 MAX_ENERGY = 100.0
 MAX_HEALTH = 1.0
-ENERGY_COST_MOVE = 0.5 # Cheap movement
-ENERGY_GAIN_PLANT = 50.0 # Standard reward
+ENERGY_COST_MOVE = 0.3 # Very High cost
+ENERGY_GAIN_PLANT = 100.0 # Huge reward
 ENERGY_GAIN_MEAT = 50.0
-DAMAGE_CARNIVORE = 1.0 # Instant death
-DAMAGE_WALL = 0.2 # 5 hits = death
-REPRODUCE_ENERGY_THRESHOLD = 95.0 # Hard to reproduce
-REPRODUCE_COST = 90.0 # High cost
-PLANT_GROWTH_PROB = 0.03 # Moderate food
+DAMAGE_CARNIVORE = 0.0 # Harmless
+DAMAGE_WALL = 0.1 # Survivable
+REPRODUCE_ENERGY_THRESHOLD = 60.0 # Easier to reproduce
+REPRODUCE_COST = 50.0 # Lower cost
+PLANT_GROWTH_PROB = 0.005 # Very scarce food
 PLANT_MAX_DENSITY_NEIGHBORS = 4
 TREE_BIRTH_PROB = 0.001 # Infrequent
 TREE_DEATH_PROB = 0.001 # Infrequent
@@ -63,7 +63,11 @@ TYPE_CARNIVORE = 4
 TYPE_AGENT = 5
 
 # Directions: N, E, S, W
-DIRS = [(0, -1), (1, 0), (0, 1), (-1, 0)] # x, y changes
+# Directions: N, E, W, S
+# Reordered so that complements are opposites:
+# 0 (00) -> N, 3 (11) -> S
+# 1 (01) -> E, 2 (10) -> W
+DIRS = [(0, -1), (1, 0), (-1, 0), (0, 1)] # x, y changes
 
 # --- HELPER FUNCTIONS ---
 
@@ -77,9 +81,9 @@ def bits_to_weight(bits):
     """Decodes 4 bits into a weight value.
     Mapping 0-15 integer to range roughly -4.0 to +4.0"""
     val = int(bits, 2)
-    # Map 0..15 to -0.375 .. +0.375 (Was -1.5 to 1.5)
-    # Smaller weights = Sigmoid closer to 0.5 = More random initial behavior
-    return (val - 7.5) / 20.0
+    # Map 0..15 to -0.1 .. +0.1
+    # Small weights = Sigmoid closer to 0.5 = Random initial behavior (like Brownian)
+    return (val - 7.5) / 75.0
 
 def get_distance_value(dist, max_dist):
     """Paper: 'value from 0.5 to 1.0 proportional to closeness'"""
@@ -109,7 +113,7 @@ class Genome:
         eval_w = np.array(weights[56:]).reshape(INPUT_SIZE, EVAL_OUTPUT_SIZE)
         return action_w, eval_w
 
-    def mutate(self, rate=0.05): # Increased to 0.05
+    def mutate(self, rate=0.05): # Increased to 0.05 to break E
         new_bits = list(self.bits)
         for i in range(len(new_bits)):
             if random.random() < rate:
@@ -173,10 +177,11 @@ class Carnivore(Entity):
             dy = closest_agent.y - self.y
             
             # Simple FSA movement preference
+            # Simple FSA movement preference
             if abs(dx) > abs(dy):
-                target_dir = 1 if dx > 0 else 3 # E or W
+                target_dir = 1 if dx > 0 else 2 # E or W
             else:
-                target_dir = 2 if dy > 0 else 0 # S or N
+                target_dir = 3 if dy > 0 else 0 # S or N
         else:
             # Random walk
             target_dir = random.randint(0, 3)
@@ -323,14 +328,16 @@ class ERLAgent(Entity):
             # Composite Reward: Energy + Health (scaled)
             delta_energy = self.energy - self.prev_energy
             delta_health = (self.health - self.prev_health) * 100.0
-            r = delta_energy + delta_health
+            # Normalize reward: Add back movement cost so standard move is 0.0
+            r = delta_energy + delta_health + ENERGY_COST_MOVE
             
-            # Noise Gate: Ignore standard movement cost to prevent paralysis
-            # Cost is 1.2. We ignore anything between -1.5 and +1.5
-            if abs(r) < 1.5:
-                r = 0.0
+            # Noise Gate: Removed to allow learning from small signals
+            # if abs(r) < 1.5:
+            #     r = 0.0
+            pass
             
             # Step 1: If r = 0, go to 6 (Skip learning)
+            # if abs(r) < 1.5: r = 0.0
             if r != 0:
                 # Reconstruct previous action (o)
                 # Paper says "Output is 2 bits coding action direction N, S, E, W".
@@ -418,6 +425,10 @@ class ERLAgent(Entity):
         # Decode bits to action
         action_idx = (output_bits[0] << 1) | output_bits[1] # 0, 1, 2, 3
         
+        # Store state for next step (Energy/Health before action)
+        self.prev_energy = self.energy
+        self.prev_health = self.health
+
         # Execute Action
         self.perform_action(world, action_idx)
         
@@ -425,8 +436,6 @@ class ERLAgent(Entity):
         self.prev_input = current_input
         self.prev_action_idx = action_idx
         self.prev_eval = current_eval
-        self.prev_energy = self.energy
-        self.prev_health = self.health
         self.just_born = False
         
     def perform_action(self, world, action_idx):
