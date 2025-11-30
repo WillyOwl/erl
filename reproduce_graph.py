@@ -96,7 +96,6 @@ def run_experiments():
     plt.ioff()
     plt.savefig('population_lifetimes.png')
     print("Plot saved to population_lifetimes.png")
-    plt.show()
     return results
 
 if __name__ == "__main__":
