@@ -761,7 +761,7 @@ class Visualizer:
 
 # --- MAIN RUNNER ---
 
-def run_simulation(strategy='ERL', visualize=True, max_steps=10000, seed=None):
+def run_simulation(strategy='ERL', visualize=True, max_steps=10000, seed=None, step_callback=None):
     global SIM_STRATEGY
     SIM_STRATEGY = strategy
     
@@ -784,6 +784,9 @@ def run_simulation(strategy='ERL', visualize=True, max_steps=10000, seed=None):
     try:
         for t in range(1, max_steps + 1):
             world.update()
+            
+            if step_callback:
+                step_callback(t, world)
             
             if visualize and t % 10 == 0:
                 vis.update(world)
