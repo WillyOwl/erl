@@ -27,7 +27,7 @@ LEARNING_RATE_NEG = 0.05 # Fast learning to fix broken weights
 NOISE_PROB = 0.5       # Balanced
 
 # Simulation Constants
-AGENT_VIEW_DIST = 20 # Increased to 20 to give advantage to smart agents
+AGENT_VIEW_DIST = 4 # Increased to 20 to give advantage to smart agents
 CARNIVORE_VIEW_DIST = 6 # Paper: 6 cells
 CARNIVORE_SPAWN_FREQ = 200
 
