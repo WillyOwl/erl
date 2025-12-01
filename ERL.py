@@ -325,19 +325,10 @@ class ERLAgent(Entity):
         # ERL and L learn. E, F, B do not.
         if SIM_STRATEGY in ['ERL', 'L'] and not self.just_born:
             # Reinforcement Signal (Step 1)
-            # Composite Reward: Energy + Health (scaled)
-            delta_energy = self.energy - self.prev_energy
-            delta_health = (self.health - self.prev_health) * 100.0
-            # Normalize reward: Add back movement cost so standard move is 0.0
             r = current_eval - self.prev_eval
-            
-            # Noise Gate: Removed to allow learning from small signals
-            # if abs(r) < 1.5:
-            #     r = 0.0
             pass
             
             # Step 1: If r = 0, go to 6 (Skip learning)
-            # if abs(r) < 1.5: r = 0.0
             if r != 0:
                 # Reconstruct previous action (o)
                 # Paper says "Output is 2 bits coding action direction N, S, E, W".
