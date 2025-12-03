@@ -27,8 +27,8 @@ LEARNING_RATE_NEG = 0.05 # Fast learning to fix broken weights
 NOISE_PROB = 0.5       # Balanced
 
 # Simulation Constants
-AGENT_VIEW_DIST = 4 # Increased to 20 to give advantage to smart agents
-CARNIVORE_VIEW_DIST = 6 # Paper: 6 cells
+AGENT_VIEW_DIST = 4
+CARNIVORE_VIEW_DIST = 6
 CARNIVORE_SPAWN_FREQ = 200
 
 # Strategy Configuration
@@ -53,6 +53,7 @@ PLANT_GROWTH_PROB = 0.005 # Very scarce food
 PLANT_MAX_DENSITY_NEIGHBORS = 4
 TREE_BIRTH_PROB = 0.001 # Infrequent
 TREE_DEATH_PROB = 0.001 # Infrequent
+CORPSE_DECAY_RATE = 1.0 # Energy lost per tick for corpses
 
 # Object Types IDs
 TYPE_EMPTY = 0
@@ -205,7 +206,11 @@ class Carnivore(Entity):
                 # Eat dead agent logic handled in global loop or here?
                 # Paper: "Eat dead agents". If agent dies, carnivore gains energy.
                 if occ.health <= 0:
-                    self.energy += ENERGY_GAIN_MEAT
+                    gain = min(occ.energy, ENERGY_GAIN_MEAT)
+                    self.energy += gain
+                    occ.energy -= gain
+                    if occ.energy <= 0:
+                        world.remove_entity(occ)
                 # Carnivore doesn't move onto living agent, just hits it
             elif isinstance(occ, Wall):
                 pass
@@ -471,8 +476,11 @@ class ERLAgent(Entity):
             elif isinstance(occ, Carnivore):
                 if occ.dead:
                     # Eat dead carnivore
-                    world.remove_entity(occ)
-                    self.energy += ENERGY_GAIN_MEAT
+                    gain = min(occ.energy, ENERGY_GAIN_MEAT)
+                    self.energy += gain
+                    occ.energy -= gain
+                    if occ.energy <= 0:
+                        world.remove_entity(occ)
                 else:
                     # Damage living carnivore
                     occ.health -= DAMAGE_CARNIVORE # Agent damages carnivore
@@ -481,8 +489,11 @@ class ERLAgent(Entity):
             elif isinstance(occ, ERLAgent):
                 if occ.dead:
                     # Eat dead agent
-                    world.remove_entity(occ)
-                    self.energy += ENERGY_GAIN_MEAT
+                    gain = min(occ.energy, ENERGY_GAIN_MEAT)
+                    self.energy += gain
+                    occ.energy -= gain
+                    if occ.energy <= 0:
+                        world.remove_entity(occ)
                 else:
                     # Damage living agent
                     occ.health -= DAMAGE_CARNIVORE # Treat same as carnivore damage? Table says "Damage other"
@@ -686,11 +697,12 @@ class World:
             # Check if we should keep corpse
             if da.energy > 0:
                 # It's a corpse with meat.
-                # We remove from self.agents so it doesn't think, but keep in grid.
-                # We need a Corpse entity? Or just use Agent class with dead=True.
-                # The loop iterates self.agents. So if we remove from list but keep in grid...
-                if da in self.agents: self.agents.remove(da)
-                # It stays in self.grid[x][y]
+                # Keep in self.agents (skipped in step loop) so we can decay it.
+                
+                # Decay
+                da.energy -= CORPSE_DECAY_RATE
+                if da.energy <= 0:
+                    self.remove_entity(da)
             else:
                 self.remove_entity(da)
 
