@@ -11,7 +11,7 @@ from scipy.stats import norm
 
 # Configuration for Quick Verification
 STRATEGIES = ['ERL', 'E', 'L', 'F', 'Programmatic', 'PE', 'PL', 'B']
-TRIALS_PER_STRATEGY = 1000 # Reduced for quick baseline
+TRIALS_PER_STRATEGY = 4000
 MAX_STEPS = 2000
 
 # Strategy display names for plot legends
@@ -36,50 +36,71 @@ def run_single_trial(strategy, trial_num, seed_offset):
         steps, history = ERL.run_simulation(strategy=strategy, visualize=False, max_steps=MAX_STEPS, seed=current_seed)
     return steps, current_seed, history
 
+import pickle
+import os
+import sys
+
+# ... (imports)
+
 def run_experiments(strategies=None):
     if strategies is None:
         strategies = STRATEGIES
-    results = {s: [] for s in strategies}
     
-    print(f"Running {TRIALS_PER_STRATEGY} trials (max {MAX_STEPS} steps) for each strategy using {multiprocessing.cpu_count()} CPU cores...")
+    results_file = 'experiment_results.pkl'
+    analyze_only = '--analyze' in sys.argv
     
-    # Submit ALL tasks at once
-    with multiprocessing.Pool() as pool:
-        all_async_results = []
+    results = {}
+    
+    if analyze_only and os.path.exists(results_file):
+        print(f"Loading results from {results_file} for analysis...")
+        with open(results_file, 'rb') as f:
+            results = pickle.load(f)
+    else:
+        results = {s: [] for s in strategies}
         
-        # Generate a random seed offset for this run
-        seed_offset = int(time.time()) % 10000
-        print(f"Using seed offset: {seed_offset}")
-
-        for strategy in strategies:
-            for i in range(TRIALS_PER_STRATEGY):
-                res = pool.apply_async(run_single_trial, (strategy, i, seed_offset))
-                all_async_results.append((strategy, i, res))
+        print(f"Running {TRIALS_PER_STRATEGY} trials (max {MAX_STEPS} steps) for each strategy using {multiprocessing.cpu_count()} CPU cores...")
         
-        start_time = time.time()
-        total_trials = len(all_async_results)
-        finished_count = 0
-        
-        while finished_count < total_trials:
-            for idx, (strategy, trial_num, res) in enumerate(all_async_results):
-                if res is None: continue
+        # Submit ALL tasks at once
+        with multiprocessing.Pool() as pool:
+            all_async_results = []
+            
+            # Generate a random seed offset for this run
+            seed_offset = int(time.time()) % 10000
+            print(f"Using seed offset: {seed_offset}")
+    
+            for strategy in strategies:
+                for i in range(TRIALS_PER_STRATEGY):
+                    res = pool.apply_async(run_single_trial, (strategy, i, seed_offset))
+                    all_async_results.append((strategy, i, res))
+            
+            start_time = time.time()
+            total_trials = len(all_async_results)
+            finished_count = 0
+            
+            while finished_count < total_trials:
+                for idx, (strategy, trial_num, res) in enumerate(all_async_results):
+                    if res is None: continue
+                    
+                    if res.ready():
+                        try:
+                            steps, seed, history = res.get()
+                            results[strategy].append((steps, seed, history))
+                            all_async_results[idx] = (strategy, trial_num, None)
+                            finished_count += 1
+                            # print(f"[{strategy}] Trial {trial_num+1} finished: {steps}")
+                        except Exception as e:
+                            print(f"[{strategy}] Trial {trial_num+1} failed: {e}")
+                            all_async_results[idx] = (strategy, trial_num, None)
+                            finished_count += 1
                 
-                if res.ready():
-                    try:
-                        steps, seed, history = res.get()
-                        results[strategy].append((steps, seed, history))
-                        all_async_results[idx] = (strategy, trial_num, None)
-                        finished_count += 1
-                        # print(f"[{strategy}] Trial {trial_num+1} finished: {steps}")
-                    except Exception as e:
-                        print(f"[{strategy}] Trial {trial_num+1} failed: {e}")
-                        all_async_results[idx] = (strategy, trial_num, None)
-                        finished_count += 1
+                time.sleep(0.5)
+                
+            duration = time.time() - start_time
+            print(f"All experiments finished in {duration:.2f}s")
             
-            time.sleep(0.5)
-            
-        duration = time.time() - start_time
-        print(f"All experiments finished in {duration:.2f}s")
+        print(f"Saving results to {results_file}...")
+        with open(results_file, 'wb') as f:
+            pickle.dump(results, f)
     
     # Analyze Results
     print("\n--- RESULTS (Average Steps Survived) ---")
@@ -370,9 +391,29 @@ def plot_kaplan_meier(results):
     plt.close()
 
 
+
+class Logger(object):
+    def __init__(self, filename="experiment_results.txt"):
+        self.terminal = sys.stdout
+        self.log = open(filename, "w")
+
+    def write(self, message):
+        self.terminal.write(message)
+        self.log.write(message)
+        self.log.flush()
+
+    def flush(self):
+        self.terminal.flush()
+        self.log.flush()
+
 if __name__ == "__main__":
     try:
         multiprocessing.set_start_method('fork')
     except RuntimeError:
         pass
+    
+    # Redirect stdout to both terminal and file
+    sys.stdout = Logger()
+    
     run_experiments()
+
