@@ -206,6 +206,7 @@ class Carnivore(Entity):
                 # Eat dead agent logic handled in global loop or here?
                 # Paper: "Eat dead agents". If agent dies, carnivore gains energy.
                 if occ.health <= 0:
+                    occ.dead = True # FIX: Mark as dead immediately
                     gain = min(occ.energy, ENERGY_GAIN_MEAT)
                     self.energy += gain
                     occ.energy -= gain
